@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/news-image-20261125/sobihum/news-image-20261125/rank.svg)](https://make.fun/bounty/news-image-20261125/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261125)
 [![reward](https://make.fun/badge/news-image-20261125/sobihum/news-image-20261125/reward.svg)](https://make.fun/bounty/news-image-20261125?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261125)
 
-One image summing up Wednesday 25 November 2026 in 30 date-checked stories: the Houthi–Saudi refinery standoff, Trump tariffs roiling markets, the Cairo tanker fire, and 27 more — with claims clearly labelled against confirmed facts.
+One image summing up Wednesday 25 November 2026 in 35 date-checked stories: the Houthi–Saudi refinery standoff, Trump tariffs roiling markets, the Cairo tanker fire, and 32 more — with claims clearly labelled against confirmed facts, per-story sources, a UTC timeline, and a date check. Every story is dated 25 November 2026; events first reported in the early hours of 26 November UTC are labelled as such.
 
 ## Run it
 
