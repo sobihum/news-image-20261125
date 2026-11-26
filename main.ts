@@ -1,4 +1,4 @@
-// news-image-20261125 v3 — entrypoint.
+// news-image-20261125 v4 — entrypoint.
 //
 // The finished 1024x1024 entry.png sits next to this file. This script
 // validates it byte by byte and then copies it to
@@ -13,7 +13,7 @@
 //   * at least one non-empty IDAT chunk, all IDAT chunks consecutive,
 //     a well-formed IEND, no trailing bytes, and total size at most 1 MiB
 //   * a PLTE chunk, if present, holds whole RGB entries (length % 3 == 0,
-//     at most 256 entries)
+//     at most 256 entries) and appears at most once
 // After copying, the output file is read back and its sha256 and size
 // must match the source exactly. Node 22 stdlib only — no dependencies,
 // no network. A plain copy, so two runs are byte-identical.
@@ -64,6 +64,7 @@ let chunkCount = 0;
 let foundIHDR = false;
 let foundIDAT = false;
 let foundIEND = false;
+let foundPLTE = false;
 let idatStarted = false;
 let idatEnded = false;
 let idatBytes = 0;
@@ -105,11 +106,22 @@ while (offset < png.length) {
     }
   }
   if (type === "PLTE") {
+    if (foundPLTE) die("duplicate PLTE chunk");
+    foundPLTE = true;
     if (length % 3 !== 0) die("PLTE length must be a multiple of 3, got " + length);
     if (length > 768) die("PLTE holds at most 256 entries, got " + length / 3);
   }
   if (type === "IDAT") {
     if (idatEnded) die("IDAT chunks are not consecutive");
+    if (!idatStarted && length >= 2) {
+      // First IDAT bytes must be a valid zlib stream header (CMF 0x78,
+      // and (CMF * 256 + FLG) divisible by 31).
+      const cmf = png[dataStart];
+      const flg = png[dataStart + 1];
+      if (cmf !== 0x78 || (cmf * 256 + flg) % 31 !== 0) {
+        die("first IDAT chunk does not start with a valid zlib header");
+      }
+    }
     idatStarted = true;
     idatBytes += length;
     if (length > 0) foundIDAT = true;
