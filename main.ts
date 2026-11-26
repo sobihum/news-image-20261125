@@ -5,11 +5,15 @@
 // $MAKEFUN_OUTPUT_DIR/entry.png:
 //   * PNG magic signature
 //   * IHDR is the first chunk, 13 bytes, 1024x1024, 8-bit depth, RGB
-//     (color type 2)
-//   * a full walk over every chunk, checking length bounds and the
-//     CRC-32 of each chunk's type + data
-//   * at least one non-empty IDAT chunk, a well-formed IEND, no trailing
-//     bytes, and total size at most 1 MiB
+//     (color type 2), compression method 0, filter method 0, and a
+//     valid interlace method (0 or 1); exactly one IHDR
+//   * every chunk type is four ASCII letters, and a full walk over every
+//     chunk checks length bounds and the CRC-32 of each chunk's
+//     type + data
+//   * at least one non-empty IDAT chunk, all IDAT chunks consecutive,
+//     a well-formed IEND, no trailing bytes, and total size at most 1 MiB
+//   * a PLTE chunk, if present, holds whole RGB entries (length % 3 == 0,
+//     at most 256 entries)
 // After copying, the output file is read back and its sha256 and size
 // must match the source exactly. Node 22 stdlib only — no dependencies,
 // no network. A plain copy, so two runs are byte-identical.
@@ -60,11 +64,20 @@ let chunkCount = 0;
 let foundIHDR = false;
 let foundIDAT = false;
 let foundIEND = false;
+let idatStarted = false;
+let idatEnded = false;
+let idatBytes = 0;
 
 while (offset < png.length) {
   if (offset + 8 > png.length) die("truncated chunk header at offset " + offset);
   const length = png.readUInt32BE(offset);
   const type = png.subarray(offset + 4, offset + 8).toString("ascii");
+  for (let i = 0; i < 4; i++) {
+    const code = type.charCodeAt(i);
+    if (!((code >= 65 && code <= 90) || (code >= 97 && code <= 122))) {
+      die("invalid chunk type bytes at offset " + offset);
+    }
+  }
   const dataStart = offset + 8;
   const dataEnd = dataStart + length;
   const chunkEnd = dataEnd + 4;
@@ -74,6 +87,7 @@ while (offset < png.length) {
   if (storedCrc !== computedCrc) die("CRC-32 mismatch in " + type + " chunk");
 
   if (type === "IHDR") {
+    if (foundIHDR) die("duplicate IHDR chunk");
     foundIHDR = true;
     if (offset !== 8) die("IHDR is not the first chunk");
     if (length !== 13) die("IHDR must be 13 bytes, got " + length);
@@ -84,8 +98,24 @@ while (offset < png.length) {
     }
     if (png[dataStart + 8] !== 8) die("expected 8-bit depth, got " + png[dataStart + 8]);
     if (png[dataStart + 9] !== 2) die("expected RGB color type 2, got " + png[dataStart + 9]);
+    if (png[dataStart + 10] !== 0) die("expected compression method 0, got " + png[dataStart + 10]);
+    if (png[dataStart + 11] !== 0) die("expected filter method 0, got " + png[dataStart + 11]);
+    if (png[dataStart + 12] !== 0 && png[dataStart + 12] !== 1) {
+      die("expected interlace method 0 or 1, got " + png[dataStart + 12]);
+    }
   }
-  if (type === "IDAT" && length > 0) foundIDAT = true;
+  if (type === "PLTE") {
+    if (length % 3 !== 0) die("PLTE length must be a multiple of 3, got " + length);
+    if (length > 768) die("PLTE holds at most 256 entries, got " + length / 3);
+  }
+  if (type === "IDAT") {
+    if (idatEnded) die("IDAT chunks are not consecutive");
+    idatStarted = true;
+    idatBytes += length;
+    if (length > 0) foundIDAT = true;
+  } else if (idatStarted) {
+    idatEnded = true;
+  }
   if (type === "IEND") {
     foundIEND = true;
     if (length !== 0) die("IEND must be empty");
@@ -98,6 +128,8 @@ while (offset < png.length) {
 if (!foundIHDR) die("missing IHDR");
 if (!foundIEND) die("missing IEND");
 if (!foundIDAT) die("missing non-empty IDAT chunk (no image data)");
+if (idatBytes === 0) die("IDAT chunks carry zero bytes of image data");
+if (chunkCount < 3) die("expected at least IHDR, IDAT and IEND chunks, got " + chunkCount);
 if (png.length > 1024 * 1024) die("entry.png exceeds 1 MiB (" + png.length + " bytes)");
 
 const sourceSha = createHash("sha256").update(png).digest("hex");
