@@ -1,9 +1,11 @@
 // news-image-20261125 v2 — entrypoint.
 // Copies the finished 1024x1024 entry.png next to this file into
 // $MAKEFUN_OUTPUT_DIR/entry.png, after validating the PNG byte by byte:
-// magic signature, IHDR dimensions (1024x1024), and a full chunk walk
-// with CRC-32 verification of every chunk. Node 22 stdlib only, no deps,
-// no network. Two runs produce byte-identical output (plain file copy).
+// magic signature, IHDR dimensions (1024x1024), 8-bit depth and RGB
+// color type 2, at least one non-empty IDAT chunk, and a full chunk walk
+// with CRC-32 verification of every chunk. After copying, the output is
+// re-read and its sha256 must match the source. Node 22 stdlib only,
+// no deps, no network. Two runs produce byte-identical output (plain copy).
 import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -48,6 +50,7 @@ if (!png.subarray(0, 8).equals(SIG)) fail("bad PNG signature");
 let off = 8;
 let sawIHDR = false;
 let sawIEND = false;
+let sawIDAT = false;
 let chunks = 0;
 while (off < png.length) {
   if (off + 8 > png.length) fail("truncated chunk header at offset " + off);
@@ -66,6 +69,14 @@ while (off < png.length) {
     const w = png.readUInt32BE(dataStart);
     const h = png.readUInt32BE(dataStart + 4);
     if (w !== 1024 || h !== 1024) fail("expected 1024x1024, got " + w + "x" + h);
+    if (len !== 13) fail("IHDR must be 13 bytes, got " + len);
+    const bitDepth = png[dataStart + 8];
+    const colorType = png[dataStart + 9];
+    if (bitDepth !== 8) fail("expected 8-bit depth, got " + bitDepth);
+    if (colorType !== 2) fail("expected RGB color type 2, got " + colorType);
+  }
+  if (type === "IDAT") {
+    if (len > 0) sawIDAT = true;
   }
   if (type === "IEND") {
     sawIEND = true;
@@ -77,9 +88,16 @@ while (off < png.length) {
 }
 if (!sawIHDR) fail("missing IHDR");
 if (!sawIEND) fail("missing IEND");
+if (!sawIDAT) fail("missing non-empty IDAT chunk (no image data)");
 if (png.length > 1024 * 1024) fail("entry.png exceeds 1 MiB (" + png.length + " bytes)");
 
 const sha = createHash("sha256").update(png).digest("hex");
 mkdirSync(outDir, { recursive: true });
-copyFileSync(SRC, join(outDir, "entry.png"));
-console.log(`entry.png OK: 1024x1024, ${chunks} chunks, CRC-32 verified, ${png.length} bytes, sha256 ${sha}`);
+const outPath = join(outDir, "entry.png");
+copyFileSync(SRC, outPath);
+// Re-read the copied file and verify it matches the source byte for byte.
+const copied = readFileSync(outPath);
+const copiedSha = createHash("sha256").update(copied).digest("hex");
+if (copiedSha !== sha) fail("output sha256 mismatch after copy: " + copiedSha + " != " + sha);
+if (copied.length !== png.length) fail("output size mismatch after copy");
+console.log(`entry.png OK: 1024x1024, ${chunks} chunks, CRC-32 verified, ${png.length} bytes, sha256 ${sha}, copy verified`);
