@@ -1,18 +1,25 @@
-// news-image-20261125 v2 — entrypoint.
-// Copies the finished 1024x1024 entry.png next to this file into
-// $MAKEFUN_OUTPUT_DIR/entry.png, after validating the PNG byte by byte:
-// magic signature, IHDR dimensions (1024x1024), 8-bit depth and RGB
-// color type 2, at least one non-empty IDAT chunk, and a full chunk walk
-// with CRC-32 verification of every chunk. After copying, the output is
-// re-read and its sha256 must match the source. Node 22 stdlib only,
-// no deps, no network. Two runs produce byte-identical output (plain copy).
+// news-image-20261125 v3 — entrypoint.
+//
+// The finished 1024x1024 entry.png sits next to this file. This script
+// validates it byte by byte and then copies it to
+// $MAKEFUN_OUTPUT_DIR/entry.png:
+//   * PNG magic signature
+//   * IHDR is the first chunk, 13 bytes, 1024x1024, 8-bit depth, RGB
+//     (color type 2)
+//   * a full walk over every chunk, checking length bounds and the
+//     CRC-32 of each chunk's type + data
+//   * at least one non-empty IDAT chunk, a well-formed IEND, no trailing
+//     bytes, and total size at most 1 MiB
+// After copying, the output file is read back and its sha256 and size
+// must match the source exactly. Node 22 stdlib only — no dependencies,
+// no network. A plain copy, so two runs are byte-identical.
 import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SRC = join(HERE, "entry.png");
+const SOURCE = join(HERE, "entry.png");
 
 const outDir = process.env.MAKEFUN_OUTPUT_DIR;
 if (!outDir) {
@@ -20,84 +27,91 @@ if (!outDir) {
   process.exit(1);
 }
 
-// --- CRC-32 (IEEE, table-driven, pure JS) ---
-const CRC_TABLE = (() => {
-  const t = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    t[n] = c >>> 0;
-  }
-  return t;
-})();
-function crc32(buf) {
-  let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
-  return (c ^ 0xffffffff) >>> 0;
-}
-
-function fail(msg) {
-  console.error("PNG validation failed: " + msg);
+function die(message) {
+  console.error("PNG validation failed: " + message);
   process.exit(1);
 }
 
-const png = readFileSync(SRC);
-if (png.length < 8 + 25) fail("file too short");
-const SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-if (!png.subarray(0, 8).equals(SIG)) fail("bad PNG signature");
-
-// Walk every chunk, verifying length bounds and CRC-32.
-let off = 8;
-let sawIHDR = false;
-let sawIEND = false;
-let sawIDAT = false;
-let chunks = 0;
-while (off < png.length) {
-  if (off + 8 > png.length) fail("truncated chunk header at offset " + off);
-  const len = png.readUInt32BE(off);
-  const type = png.subarray(off + 4, off + 8).toString("ascii");
-  const dataStart = off + 8;
-  const dataEnd = dataStart + len;
-  const crcEnd = dataEnd + 4;
-  if (crcEnd > png.length) fail("truncated chunk " + type);
-  const stored = png.readUInt32BE(dataEnd);
-  const actual = crc32(png.subarray(off + 4, dataEnd));
-  if (stored !== actual) fail("CRC-32 mismatch in " + type + " chunk");
-  if (type === "IHDR") {
-    sawIHDR = true;
-    if (off !== 8) fail("IHDR is not the first chunk");
-    const w = png.readUInt32BE(dataStart);
-    const h = png.readUInt32BE(dataStart + 4);
-    if (w !== 1024 || h !== 1024) fail("expected 1024x1024, got " + w + "x" + h);
-    if (len !== 13) fail("IHDR must be 13 bytes, got " + len);
-    const bitDepth = png[dataStart + 8];
-    const colorType = png[dataStart + 9];
-    if (bitDepth !== 8) fail("expected 8-bit depth, got " + bitDepth);
-    if (colorType !== 2) fail("expected RGB color type 2, got " + colorType);
+// CRC-32 (IEEE 802.3 polynomial), table-driven, pure JS.
+const TABLE = new Uint32Array(256);
+for (let n = 0; n < 256; n++) {
+  let c = n;
+  for (let k = 0; k < 8; k++) {
+    c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
   }
-  if (type === "IDAT") {
-    if (len > 0) sawIDAT = true;
-  }
-  if (type === "IEND") {
-    sawIEND = true;
-    if (len !== 0) fail("IEND must be empty");
-    if (crcEnd !== png.length) fail("trailing bytes after IEND");
-  }
-  chunks++;
-  off = crcEnd;
+  TABLE[n] = c >>> 0;
 }
-if (!sawIHDR) fail("missing IHDR");
-if (!sawIEND) fail("missing IEND");
-if (!sawIDAT) fail("missing non-empty IDAT chunk (no image data)");
-if (png.length > 1024 * 1024) fail("entry.png exceeds 1 MiB (" + png.length + " bytes)");
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) {
+    c = TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
 
-const sha = createHash("sha256").update(png).digest("hex");
+const png = readFileSync(SOURCE);
+if (png.length < 8 + 25) die("file too short to hold a PNG header");
+
+const MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+if (!png.subarray(0, 8).equals(MAGIC)) die("bad PNG signature");
+
+let offset = 8;
+let chunkCount = 0;
+let foundIHDR = false;
+let foundIDAT = false;
+let foundIEND = false;
+
+while (offset < png.length) {
+  if (offset + 8 > png.length) die("truncated chunk header at offset " + offset);
+  const length = png.readUInt32BE(offset);
+  const type = png.subarray(offset + 4, offset + 8).toString("ascii");
+  const dataStart = offset + 8;
+  const dataEnd = dataStart + length;
+  const chunkEnd = dataEnd + 4;
+  if (chunkEnd > png.length) die("truncated " + type + " chunk");
+  const storedCrc = png.readUInt32BE(dataEnd);
+  const computedCrc = crc32(png.subarray(offset + 4, dataEnd));
+  if (storedCrc !== computedCrc) die("CRC-32 mismatch in " + type + " chunk");
+
+  if (type === "IHDR") {
+    foundIHDR = true;
+    if (offset !== 8) die("IHDR is not the first chunk");
+    if (length !== 13) die("IHDR must be 13 bytes, got " + length);
+    const width = png.readUInt32BE(dataStart);
+    const height = png.readUInt32BE(dataStart + 4);
+    if (width !== 1024 || height !== 1024) {
+      die("expected 1024x1024, got " + width + "x" + height);
+    }
+    if (png[dataStart + 8] !== 8) die("expected 8-bit depth, got " + png[dataStart + 8]);
+    if (png[dataStart + 9] !== 2) die("expected RGB color type 2, got " + png[dataStart + 9]);
+  }
+  if (type === "IDAT" && length > 0) foundIDAT = true;
+  if (type === "IEND") {
+    foundIEND = true;
+    if (length !== 0) die("IEND must be empty");
+    if (chunkEnd !== png.length) die("trailing bytes after IEND");
+  }
+  chunkCount++;
+  offset = chunkEnd;
+}
+
+if (!foundIHDR) die("missing IHDR");
+if (!foundIEND) die("missing IEND");
+if (!foundIDAT) die("missing non-empty IDAT chunk (no image data)");
+if (png.length > 1024 * 1024) die("entry.png exceeds 1 MiB (" + png.length + " bytes)");
+
+const sourceSha = createHash("sha256").update(png).digest("hex");
 mkdirSync(outDir, { recursive: true });
 const outPath = join(outDir, "entry.png");
-copyFileSync(SRC, outPath);
-// Re-read the copied file and verify it matches the source byte for byte.
+copyFileSync(SOURCE, outPath);
+
 const copied = readFileSync(outPath);
+if (copied.length !== png.length) die("output size mismatch after copy");
 const copiedSha = createHash("sha256").update(copied).digest("hex");
-if (copiedSha !== sha) fail("output sha256 mismatch after copy: " + copiedSha + " != " + sha);
-if (copied.length !== png.length) fail("output size mismatch after copy");
-console.log(`entry.png OK: 1024x1024, ${chunks} chunks, CRC-32 verified, ${png.length} bytes, sha256 ${sha}, copy verified`);
+if (copiedSha !== sourceSha) {
+  die("output sha256 mismatch after copy: " + copiedSha + " != " + sourceSha);
+}
+console.log(
+  `entry.png OK: 1024x1024, ${chunkCount} chunks, CRC-32 verified, ` +
+    `${png.length} bytes, sha256 ${sourceSha}, copy verified`,
+);
